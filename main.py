@@ -1,5 +1,5 @@
-# This is the main module
-# It provides an overview of the program purpose and functionality.
+# from https://unitn-sml.github.io/rsbench/
+# Can be used to run the baseline models
 
 import sys, os
 import torch
