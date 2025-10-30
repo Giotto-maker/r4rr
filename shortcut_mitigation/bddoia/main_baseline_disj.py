@@ -1,0 +1,316 @@
+import os 
+import sys
+import torch
+import random
+import signal
+import numpy as np
+import torch.nn.functional as F
+
+from argparse import Namespace
+from torch.utils.data import DataLoader
+from warmup_scheduler import GradualWarmupScheduler
+
+from baseline_modules.utility_modules import setup
+from baseline_modules.supervision_modules.disj_pretraining import pre_train
+from baseline_modules.utility_modules.run_evaluation import evaluate_my_model
+from baseline_modules.supervision_modules import build_sup_set_disj, build_sup_set_joint
+
+from protonet_STOP_bddoia_modules.proto_modules.proto_helpers import assert_inputs
+from protonet_bddoia_modules.utility_modules.other_utils import check_optimizer_params 
+
+sys.path.append(os.path.abspath(".."))  
+sys.path.append(os.path.abspath("../.."))  
+
+from utils import fprint
+from utils.status import progress_bar
+from utils.metrics import evaluate_metrics
+from utils.dpl_loss import ADDMNIST_DPL
+from utils.checkpoint import save_model
+
+from models import get_model
+from models.mnistdpl import MnistDPL
+from datasets import get_dataset
+
+
+# ! Training Loop
+def train(
+        model: MnistDPL,
+        supervised_dataloaders: dict,
+        aggregated_dataloader: DataLoader,
+        _loss: ADDMNIST_DPL,
+        save_path: str,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        args: Namespace,
+        eval_concepts: list = None,
+        seed: int = 0,
+    ) -> float:
+
+    # for full reproducibility
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.enabled = False
+    
+    # early stopping
+    best_cacc = 0.0
+    epochs_no_improve = 0
+    
+    # scheduler & warmup (not used) for main model
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(model.opt, args.exp_decay)
+    w_scheduler = None
+    if args.warmup_steps > 0:
+        w_scheduler = GradualWarmupScheduler(model.opt, 1.0, args.warmup_steps)
+
+    # create optimizers and schedulers for each encoder
+    enc_opts, enc_schs = {}, {}
+    for c, name in enumerate(eval_concepts):
+        opt = torch.optim.Adam(model.encoder[c].parameters())
+        sch = torch.optim.lr_scheduler.StepLR(opt, step_size=10, gamma=0.5)
+        enc_opts[c], enc_schs[c] = opt, sch
+
+    # move each encoder to device
+    for b in range(len(model.encoder)):
+        model.encoder[b].train()
+        model.encoder[b].to(model.device)
+
+    fprint("\n--- Start of Training ---\n")
+    model.to(model.device)
+    model.opt.zero_grad()
+    model.opt.step()
+
+    # ^ Training start
+    for epoch in range(args.n_epochs):
+        print(f"Epoch {epoch+1}/{args.n_epochs}")
+
+        # * Pretraining
+        if args.Apretrained:
+            fprint("\n--- Start of PreTraining ---\n")
+            for pepoch in range(args.proto_epochs):        
+                for k, name in enumerate(eval_concepts):
+                    dl = supervised_dataloaders[k]
+                    opt, sch = enc_opts[k], enc_schs[k]
+                    fprint(f"\n--- Pretraining of {name} ---\n")
+                    for i, batch in enumerate(dl):
+                        batch_embeds, batch_labels = batch
+                        batch_embeds = batch_embeds.to(model.device)
+                        batch_labels = batch_labels.to(model.device)
+                        opt.zero_grad()
+                        preds = model.encoder[k](batch_embeds)
+                        assert preds.shape == (batch_embeds.shape[0], 1),\
+                            f"Expected shape ({batch_embeds.shape[0]}, 1), got {preds.shape}"
+                        loss = F.binary_cross_entropy(
+                                preds.squeeze(1), 
+                                batch_labels[:, k].float()
+                            )
+                        loss.backward()
+                        opt.step()
+                        progress_bar(i, len(dl), pepoch, loss.item())
+                    sch.step()
+
+        # * Backbone supervision phase
+        elif args.c:
+            print("Backbone supervision phase")
+            for i, batch in enumerate(aggregated_dataloader):
+                batch_embeds, batch_labels = batch
+                batch_embeds = batch_embeds.to(model.device)
+                batch_labels = batch_labels.to(model.device)
+
+                model.opt.zero_grad()
+                out_dict = model(batch_embeds)
+                concept_predictions = out_dict["CS"]
+                loss = F.binary_cross_entropy(concept_predictions, batch_labels.float())
+
+                loss.backward()
+                model.opt.step()
+
+                progress_bar(i, len(aggregated_dataloader), epoch, loss.item())
+
+
+        # * Unsupervised Training
+        print("Unsupervised training phase")
+        model.train()
+        ys, y_true, cs, cs_true, batch = None, None, None, None, 0
+        for i, batch in enumerate(train_loader):
+
+            if random.random() > args.uns_parameter_percentage:
+                continue  # Skip this batch with probability (1 - percentage)
+            
+            # ------------------ original embneddings
+            images_embeddings = torch.stack(batch['embeddings']).to(model.device)
+            attr_labels = torch.stack(batch['attr_labels']).to(model.device)
+            class_labels = torch.stack(batch['class_labels'])[:,:-1].to(model.device)
+            # ------------------ my extracted features
+            images_embeddings_raw = torch.stack(batch['embeddings_raw']).to(model.device)
+            detected_rois = batch['rois']
+            detected_rois_feats = batch['roi_feats']
+            detection_labels = batch['detection_labels']
+            detection_scores = batch['detection_scores']
+            assert_inputs(images_embeddings, attr_labels, class_labels,
+                   detected_rois_feats, detected_rois, detection_labels,
+                   detection_scores, images_embeddings_raw)
+
+            out_dict = model(images_embeddings_raw)
+            out_dict.update({"LABELS": class_labels, "CONCEPTS": attr_labels})
+            
+            model.opt.zero_grad()
+            loss, losses = _loss(out_dict, args)
+
+            loss.backward()
+            model.opt.step()
+
+            if ys is None:
+                ys = out_dict["YS"]
+                y_true = out_dict["LABELS"]
+                cs = out_dict["pCS"]
+                cs_true = out_dict["CONCEPTS"]
+            else:
+                ys = torch.concatenate((ys, out_dict["YS"]), dim=0)
+                y_true = torch.concatenate((y_true, out_dict["LABELS"]), dim=0)
+                cs = torch.concatenate((cs, out_dict["pCS"]), dim=0)
+                cs_true = torch.concatenate((cs_true, out_dict["CONCEPTS"]), dim=0)
+
+            if i % 10 == 0:
+                progress_bar(i, len(train_loader) - 9, epoch, loss.item())
+            
+        # ^ Evaluation phase
+        model.eval()
+        
+        my_metrics = evaluate_metrics(
+                model=model, 
+                loader=val_loader, 
+                args=args,
+                eval_concepts=eval_concepts)
+        loss = my_metrics[0]
+        cacc = my_metrics[1]
+        yacc = my_metrics[2]
+        f1_y = my_metrics[3]
+       
+        # update at end of the epoch
+        if epoch < args.warmup_steps:   w_scheduler.step()
+        else:
+            scheduler.step()
+            if hasattr(_loss, "grade"):
+                _loss.update_grade(epoch)
+
+        ### LOGGING ###
+        fprint("  ACC C", cacc, "  ACC Y", yacc, "F1 Y", f1_y)
+        
+        if not args.tuning and cacc > best_cacc:
+            print("Saving...")
+            # Update best F1 score
+            best_cacc = cacc
+            epochs_no_improve = 0
+
+            # Save the best model
+            torch.save(model.state_dict(), save_path)
+            print(f"Saved best model with CACC score: {best_cacc}")
+
+        elif cacc <= best_cacc:
+            epochs_no_improve += 1
+
+        if epochs_no_improve >= args.patience:
+            print(f"Early stopping triggered after {epoch+1} epochs.")
+            break
+
+    fprint("\n--- End of Training ---\n")
+    return best_cacc
+
+
+if __name__ == "__main__":
+    # & read arguments and setup environment
+    args = setup.read_args()
+    setup.setup_environment(args)
+    signal.signal(signal.SIGINT, setup.sigint_handler)
+
+    # & load model and unsupervised data 
+    dataset = get_dataset(args)
+    n_images, c_split = dataset.get_split()
+    encoder, decoder = dataset.get_backbone()
+    assert isinstance(encoder, tuple) and len(encoder) == 21, "encoder must be a tuple of 21 elements"
+    model = get_model(args, encoder, decoder, n_images, c_split)
+    model.start_optim(args)
+    check_optimizer_params(model)
+    loss = model.get_loss(args)
+    print(dataset)
+    print("Using Dataset: ", dataset)
+    print("Using backbone: ", encoder)
+    print("Using Model: ", model)
+    print("Using Loss: ", loss)
+    unsup_train_loader, unsup_val_loader, unsup_test_loader = dataset.get_data_loaders(args=args)
+
+    # & create supervised dataloaders for single and aggregated backbones training
+    supervised_dataloaders = build_sup_set_disj.get_augmented_train_loader(
+        unsup_train_loader=unsup_train_loader, device=model.device, args=args
+    )
+    aggregated_dataloader = build_sup_set_joint.get_augmented_train_loader(
+            unsup_train_loader=unsup_train_loader, device=model.device, args=args
+    )
+    assert isinstance(supervised_dataloaders, dict), "supervised_dataloaders must be a dictionary"
+    for key, loader in supervised_dataloaders.items():
+        assert hasattr(loader, "__iter__"), f"Dataloader for key '{key}' must be iterable"
+    assert hasattr(aggregated_dataloader, "__iter__"), "aggregated_dataloader must be an iterable (Dataloader object)"
+
+    # & Training 
+    print(f"*** Training model with seed {args.seed}")
+    print("Chosen device:", model.device)
+    if not os.path.exists(args.save_path): os.makedirs(args.save_path, exist_ok=True)
+    save_folder = os.path.join(args.save_path, f"{args.model_parameter_name}_{args.seed}.pth")
+    print("Saving model in folder: ", save_folder)
+    eval_concepts = [
+        'green_lights', 
+        'follow_traffic', 
+        'road_clear',
+        'traffic_lights', 
+        'traffic_signs', 
+        'cars', 
+        'pedestrians', 
+        'riders', 
+        'others',
+        'no_lane_left', 
+        'obstacle_left_lane', 
+        'solid_left_line',
+        'on_right_turn_lane', 
+        'traffic_light_right', 
+        'front_car_right', 
+        'no_lane_right', 
+        'obstacle_right_lane',
+        'solid_right_line',
+        'on_left_turn_lane', 
+        'traffic_light_left', 
+        'front_car_left'
+    ]
+    # * Pretraining (if specified)
+    if args.pretrained:
+        pre_train(
+            model, 
+            supervised_dataloaders, 
+            args, 
+            eval_concepts=eval_concepts, 
+            seed=args.seed
+        )
+    # ! Standard Training
+    best_cacc = train(
+            model=model,
+            supervised_dataloaders=supervised_dataloaders,
+            aggregated_dataloader=aggregated_dataloader,
+            train_loader=unsup_train_loader,
+            val_loader=unsup_val_loader,
+            save_path=save_folder,
+            _loss=loss,
+            args=args,
+            eval_concepts=eval_concepts,
+            seed=args.seed,
+    )
+    save_model(model, args, args.seed)  # save the model parameters
+    print(f"*** Finished training model with seed {args.seed} and best CACC score {best_cacc}")
+    print("Training finished.")
+
+    # & Evaluation
+    model = get_model(args, encoder, decoder, n_images, c_split)
+    model_state_dict = torch.load(save_folder)
+    model.load_state_dict(model_state_dict)
+    evaluate_my_model(model, save_folder, unsup_test_loader, eval_concepts=eval_concepts, args=args)
+    print("End of experiment")
+    sys.exit(0)
