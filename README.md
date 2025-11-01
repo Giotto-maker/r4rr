@@ -7,10 +7,14 @@ Right Reasons: Avoiding Reasoning Shortcuts via Prototypical Neurosymbolic AI.�
 Thirty-Ninth Annual Conference on Neural Information Processing Systems (NeurIPS 2025).
 
 ```bibtex
-@misc{r4rr,
-  title     = {Right for the Right Reasons: Avoiding Reasoning Shortcuts via Prototypical Neurosymbolic AI},
-  author    = {Luca Andolfi and Eleonora Giunchiglia},
-  year      = {2025},
+@misc{andolfi2025rightrightreasonsavoiding,
+      title={Right for the Right Reasons: Avoiding Reasoning Shortcuts via Prototypical Neurosymbolic AI}, 
+      author={Luca Andolfi and Eleonora Giunchiglia},
+      year={2025},
+      eprint={2510.25497},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2510.25497}, 
 }
 ```
 
@@ -44,9 +48,9 @@ We define the background symbolic knowledge as:
 
 Now, let’s consider an input image x of a dog.
 
-Its embedding z₁ is compared against the centroids (or prototypes) for each concept. For this image, the squared distances from z₁ to the class centroids correspond to the numbers shown next to the dotted lines in Figure above. The center of belief (i.e. the average over all the prototypes representing the classes in *[h_i]* weighted by the probability assigned to each class by the model) for x with respect to [h₁] is shown as a ⭐ symbol in the figure.
+Its embedding z₁, computed by a prototypical extractor for *[h_1]*, is compared against the centroids (or prototypes) for each concept. For this image, the squared distances from z₁ to the class centroids correspond to the numbers shown next to the dotted lines in Figure above. The center of belief (i.e. the average over all the prototypes representing the classes in *[h_i]* weighted by the probability assigned to each class by the model) for x with respect to [h₁] is shown as a ⭐ symbol in the figure.
 
-Assume another embedding z₂ has the following distances to prototypes:
+Assume the embedding z₂, computed by a prototypical extractor for *[h_2]*, has the following distances to prototypes:
 
 | Prototype | Distance |
 |---|---:|
