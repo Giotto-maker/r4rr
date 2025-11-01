@@ -7,7 +7,7 @@ Right Reasons: Avoiding Reasoning Shortcuts via Prototypical Neurosymbolic AI.â€
 Thirty-Ninth Annual Conference on Neural Information Processing Systems (NeurIPS 2025).
 
 ```bibtex
-@misc{andolfi2025rightrightreasonsavoiding,
+@misc{r4rr,
       title={Right for the Right Reasons: Avoiding Reasoning Shortcuts via Prototypical Neurosymbolic AI}, 
       author={Luca Andolfi and Eleonora Giunchiglia},
       year={2025},
