@@ -76,7 +76,7 @@ In contrast, a standard neural network trained with semantic loss (but without p
 The following GIF shows a sequence of PCA projections for the logits of the standard Semantic Loss model when trained on MNIST-EvenOdd. 
 Decision boundaries are colored by the models' predictions, and the points--representing the unsupervised digit concepts--are shown with their ground truth. 
 
-![Demo GIF](github_media/GIF_baseline)
+![Demo GIF](github_media/GIF_baseline.gif)
 
 We can see the model learns to classify all digits as either 3,4 or 6. Most of the points fall into the **wrong** class, but the *Mean Absolute Error* shown on the right constantly decreases.
 This shows the model is actually learning to correctly predict the sum of the digits by arranging all points in class 3,4 and 6.
@@ -84,7 +84,7 @@ Thus, this model is **right for the wrong reason**.
 
 Now, compare the previous behaviour with the one of the *prototypical Semantic Loss model* trained on the same data from MNIST-EvenOdd.
 
-![Demo GIF](github_media/GIF_pnet)
+![Demo GIF](github_media/GIF_pnet.gif)
 
 The model leverages prototypical representatives for each class to learn how to cluster the datapoints, both minimising distances to class centroids **and** the semantic loss objective. 
 We clearly see the model is using *all* the concepts to classify the digits and the predictions are well-separated in the logits space across the classes.
