@@ -128,7 +128,14 @@ Prerequisites
 - GPU + CUDA (recommended) or CPU only (slower)
 - Install Python deps:
   ```sh
-  pip install -r [requirements.txt](requirements.txt)
+  conda create -n r4rr python=3.8.20
+  conda activate r4rr
+
+  pip install -r requirements.txt
+  pip install yaspin
+  pip install torch==1.13.0+cu117 torchvision==0.14.0+cu117 torchaudio==0.13.0 --extra-index-url https://download.pytorch.org/whl/cu117
+  pip install torch-tb-profiler==0.3.1
+  pip install torchmetrics==0.7.0
   ```
   See [requirements.txt](requirements.txt).
 - Optionally create a conda env and install the requirements file.

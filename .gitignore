@@ -5,6 +5,7 @@ __pycache__
 *.png 
 *.pdf
 *.txt
+!requirements.txt
 *.sh
 data.zip
 2mnist_10digits.zip
