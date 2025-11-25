@@ -1,10 +1,12 @@
 __pycache__
 
-.zip
+*.zip
+*.log
 *gz
 *.png 
 *.pdf
 *.txt
+*.ipynb_checkpoints
 !requirements.txt
 *.sh
 data.zip
